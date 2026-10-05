@@ -1,0 +1,54 @@
+import { BACKEND_URL } from '../api/client'
+
+/**
+ * ---------------------------------------------------------------------------
+ * Image URL handling
+ * ---------------------------------------------------------------------------
+ * Laravel stores a *relative path* in the `image` column (for example
+ * `products/iphone17.jpg`, or a bare `iphone17.jpg` for older records) and
+ * serves the public disk from `/storage/<path>`. Some records hold a full URL
+ * instead, so every branch is checked before prefixing anything.
+ */
+
+const STORAGE_BASE = `${BACKEND_URL.replace(/\/+$/, '')}/storage`
+
+/** Inline SVG used whenever a record has no usable image. */
+export const PLACEHOLDER_IMAGE = svgImage('🛍️', '#eef2ff', '#c7d2fe')
+
+function svgImage(emoji: string, from: string, to: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${from}"/><stop offset="100%" stop-color="${to}"/></linearGradient></defs><rect width="600" height="600" fill="url(#g)"/><circle cx="300" cy="300" r="190" fill="rgba(255,255,255,0.5)"/><text x="300" y="356" font-size="200" text-anchor="middle">${emoji}</text></svg>`
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
+}
+
+/**
+ * Turn whatever the API returned for `image` into something an <img> can load.
+ * Falls back to PLACEHOLDER_IMAGE for empty values.
+ */
+export function imageUrl(image: string | null | undefined): string {
+  const value = (image ?? '').trim()
+
+  if (value === '') return PLACEHOLDER_IMAGE
+
+  // Already absolute: data:, blob:, http(s):, protocol-relative
+  if (/^(data:|blob:|https?:)?\/\//i.test(value) || value.startsWith('data:')) {
+    return value
+  }
+
+  // The backend may already have prefixed /storage/ for us.
+  if (value.startsWith('/storage/')) {
+    return `${BACKEND_URL.replace(/\/+$/, '')}${value}`
+  }
+
+  const path = value.replace(/^\/+/, '')
+
+  // Older rows hold a bare filename with no folder; put it at the storage root.
+  return `${STORAGE_BASE}/${path}`
+}
+
+/** Fallback handler for <img> so a missing file shows the placeholder. */
+export function onImageError(event: Event): void {
+  const img = event.target as HTMLImageElement | null
+  if (img && img.src !== PLACEHOLDER_IMAGE) {
+    img.src = PLACEHOLDER_IMAGE
+  }
+}

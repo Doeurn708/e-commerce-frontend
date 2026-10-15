@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Local env files hold personal API keys (.env.production is committed on
+# purpose: VITE_* values are baked into the public JS bundle anyway).
+.env
+.env.local
+.env.*.local
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

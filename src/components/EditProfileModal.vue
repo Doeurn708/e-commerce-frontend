@@ -4,18 +4,18 @@ import { Camera, Loader2, Trash2, X } from '@lucide/vue'
 import { useAuth } from '../stores/auth'
 import { useI18n } from '../stores/i18n'
 import { toastError, toastSuccess } from '../stores/toast'
-import { imageUrl, onImageError } from '../utils/image'
+import { ACCEPTED_IMAGE_TYPES, MAX_IMAGE_BYTES, imageUrl, onImageError } from '../utils/image'
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void }>()
 
 const { currentUser, updateProfile } = useAuth()
 const { t } = useI18n()
 
-const MAX_BYTES = 2 * 1024 * 1024
 // Mirrors CloudinaryImageStore::ALLOWED (mimes:jpg,jpeg,png,webp). GIF is
 // deliberately absent on both sides: offering it here would let the picker
 // accept a file the API then rejects with a 422.
-const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp']
+const MAX_BYTES = MAX_IMAGE_BYTES
+const ACCEPTED = ACCEPTED_IMAGE_TYPES
 
 const name = ref('')
 const phone = ref('')

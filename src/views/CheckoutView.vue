@@ -20,10 +20,11 @@ const { currentUser, isAuthenticated } = useAuth()
 const { t } = useI18n()
 
 /**
- * The delivery address is no longer typed. `location` is whatever the map
- * reported; `locationConfirmed` is the customer's explicit acknowledgement of
- * it. A pin that moves after confirmation clears the acknowledgement, so the
- * order can never be submitted against a location the customer never agreed to.
+ * The delivery location is a coordinate pair and nothing else. `location` is
+ * whatever the map reported; `locationConfirmed` is the customer's explicit
+ * acknowledgement of it. A pin that moves after confirmation clears the
+ * acknowledgement, so the order can never be submitted against a location the
+ * customer never agreed to.
  */
 const location = ref<SelectedLocation | null>(null)
 const locationConfirmed = ref(false)
@@ -91,9 +92,9 @@ async function place() {
     return
   }
 
-  // The backend requires shipping_address, latitude and longitude together, so
-  // a missing or unconfirmed pin has to stop the submit here rather than
-  // producing a 422.
+  // The backend requires a coordinate pair, and shipping_address is optional
+  // now that no address is ever typed or looked up, so a missing or
+  // unconfirmed pin has to stop the submit here rather than producing a 422.
   if (!location.value || !locationConfirmed.value) {
     toastError(t('confirmLocationFirst'))
     return
@@ -105,7 +106,6 @@ async function place() {
   try {
     const order = await placeOrder({
       payment_method: paymentMethod.value,
-      shipping_address: location.value.address,
       latitude: location.value.latitude,
       longitude: location.value.longitude,
       phone: form.phone,
@@ -147,9 +147,10 @@ async function place() {
         </div>
 
         <!--
-          Delivery location. There is deliberately no address textarea: the map
-          is the single source of truth for shipping_address, latitude and
-          longitude, so the three can never disagree.
+          Delivery location. There is deliberately no address field: the map
+          pin is the only source of truth for the delivery location, and the
+          coordinates travel with the form. Nothing converts them to a street
+          address, so nothing here can fail on a Geocoding or Places request.
         -->
         <div class="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
           <h2 class="mb-1 text-lg font-bold text-gray-900 dark:text-white">{{ $t('deliveryLocation') }}</h2>

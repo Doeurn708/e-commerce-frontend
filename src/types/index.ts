@@ -130,7 +130,11 @@ export interface Order {
   status: OrderStatus
   payment_status: PaymentStatus
   payment_method: PaymentMethod
-  shipping_address: string
+  /**
+   * Optional: the checkout map is coordinates-only, so no street address is
+   * stored for a new order. Null on orders placed before the map existed too.
+   */
+  shipping_address: string | null
   /** Null on orders placed before the checkout map existed. */
   latitude: number | null
   longitude: number | null
@@ -177,7 +181,8 @@ export interface AdminOrder {
   user_id: number
   total_price: number
   status: OrderStatus
-  shipping_address: string
+  /** Nullable for the same reason as on Order: coordinates-only checkout. */
+  shipping_address: string | null
   phone: string
   created_at?: string
   updated_at?: string
@@ -208,9 +213,12 @@ export interface DashboardData {
 
 export interface CreateOrderPayload {
   payment_method: PaymentMethod
-  /** Human-readable label picked on the checkout map. */
-  shipping_address: string
-  /** Pin coordinates. OrderController::store requires both alongside the address. */
+  /**
+   * Optional street address. The checkout map is coordinates-only, so nothing
+   * sends this; it stays for any flow that already has a typed address.
+   */
+  shipping_address?: string
+  /** Delivery pin. OrderController::store requires both. */
   latitude: number
   longitude: number
   phone: string
@@ -224,7 +232,6 @@ export interface CreateOrderPayload {
 export interface SelectedLocation {
   latitude: number
   longitude: number
-  address: string
 }
 
 export interface CartItemDto {

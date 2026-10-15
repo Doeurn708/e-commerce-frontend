@@ -3,10 +3,17 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Save } from '@lucide/vue'
 import { useI18n } from '../../stores/i18n'
+import { toastSuccess } from '../../stores/toast'
 import { getProduct, createProduct, updateProduct } from '../../api/products'
 import { getCategories } from '../../api/categories'
 import type { ProductPayload } from '../../api/products'
-import { imageUrl, onImageError } from '../../utils/image'
+import {
+  ACCEPTED_IMAGE_TYPES,
+  fileLabel,
+  imageUrl,
+  imageFileError,
+  onImageError,
+} from '../../utils/image'
 import type { Category } from '../../types'
 
 const { t } = useI18n()
@@ -19,8 +26,6 @@ const productId = computed(() => (isEdit.value ? String(route.params.id) : null)
 const loading = ref(isEdit.value)
 const saving = ref(false)
 const error = ref('')
-const feedback = ref('')
-const feedbackError = ref(false)
 
 const categories = ref<Category[]>([])
 
@@ -40,8 +45,8 @@ const form = ref({
  */
 const imageFile = ref<File | null>(null)
 const imagePreview = ref('')
-
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024
+/** Stays on screen until the picker is fixed — a flash toast is too easy to miss. */
+const imageError = ref('')
 
 function onImageSelected(event: Event) {
   const input = event.target as HTMLInputElement
@@ -49,16 +54,13 @@ function onImageSelected(event: Event) {
 
   imageFile.value = null
   imagePreview.value = ''
+  imageError.value = ''
 
   if (!file) return
 
-  if (!file.type.startsWith('image/')) {
-    showFeedback(t('operationFailed'), true)
-    input.value = ''
-    return
-  }
-  if (file.size > MAX_IMAGE_BYTES) {
-    showFeedback('The image must not be greater than 2048 kilobytes.', true)
+  const problem = imageFileError(file)
+  if (problem) {
+    imageError.value = problem
     input.value = ''
     return
   }
@@ -70,6 +72,8 @@ function onImageSelected(event: Event) {
 function clearImage() {
   imageFile.value = null
   imagePreview.value = ''
+  imageError.value = ''
+  form.value.image = ''
   if (imageInput.value) imageInput.value.value = ''
 }
 
@@ -81,14 +85,6 @@ const currentImage = computed(() => imagePreview.value || imageUrl(form.value.im
 onBeforeUnmount(() => {
   if (imagePreview.value) URL.revokeObjectURL(imagePreview.value)
 })
-
-function showFeedback(message: string, isError = false) {
-  feedback.value = message
-  feedbackError.value = isError
-  setTimeout(() => {
-    feedback.value = ''
-  }, 3000)
-}
 
 async function loadCategories() {
   try {
@@ -126,7 +122,14 @@ onMounted(() => {
 
 async function onSubmit() {
   if (!form.value.name.trim()) {
-    showFeedback(t('pleaseFillAll'), true)
+    error.value = t('pleaseFillAll')
+    return
+  }
+  if (imageError.value && !form.value.image.trim()) {
+    // A rejected file would otherwise be dropped and the record saved without
+    // any image, while the form still reports success. Pasting a URL is an
+    // explicit choice, so it lifts the block on its own.
+    error.value = imageError.value
     return
   }
   saving.value = true
@@ -141,16 +144,22 @@ async function onSubmit() {
       // A new upload wins; otherwise keep whatever path is already stored.
       image: imageFile.value ?? (form.value.image.trim() || undefined),
     }
-    if (isEdit.value && productId.value) {
-      await updateProduct(productId.value, payload)
-      showFeedback(t('productUpdatedMsg'))
-    } else {
-      await createProduct(payload)
-      showFeedback(t('productCreatedMsg'))
+    const saved = isEdit.value && productId.value
+      ? await updateProduct(productId.value, payload)
+      : await createProduct(payload)
+
+    // Fail loudly if the file never made it to the cloud instead of leaving a
+    // record that silently points at a local path or an external URL.
+    if (imageFile.value && !saved.image?.includes('res.cloudinary.com')) {
+      error.value = 'The image was saved, but it is not on Cloudinary. Please try the upload again.'
+      return
     }
+
+    toastSuccess(isEdit.value ? t('productUpdatedMsg') : t('productCreatedMsg'))
     router.push('/admin/products')
   } catch (e) {
-    showFeedback(e instanceof Error ? e.message : t('operationFailed'), true)
+    // Persistent banner: a 3-second toast disappears before it can be read.
+    error.value = e instanceof Error ? e.message : t('operationFailed')
   } finally {
     saving.value = false
   }
@@ -176,16 +185,9 @@ async function onSubmit() {
     </div>
 
     <div
-      v-if="feedback"
-      class="rounded-2xl border px-4 py-3 text-sm font-medium"
-      :class="feedbackError
-        ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300'
-        : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300'"
+      v-if="error"
+      class="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
     >
-      {{ feedback }}
-    </div>
-
-    <div v-if="error" class="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300">
       {{ error }}
     </div>
 
@@ -241,22 +243,36 @@ async function onSubmit() {
               <input
                 ref="imageInput"
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                :accept="ACCEPTED_IMAGE_TYPES.join(',')"
                 class="block w-full text-sm text-gray-600 file:mr-4 file:rounded-full file:border-0 file:bg-indigo-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100 dark:text-gray-300 dark:file:bg-indigo-900/40 dark:file:text-indigo-300"
                 @change="onImageSelected"
               />
-              <input
-                v-model="form.image"
-                type="text"
-                placeholder="products/example.jpg or https://..."
-                class="h-10 w-full rounded-xl border border-gray-200 bg-white px-4 text-sm text-gray-700 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
-              />
-              <p class="text-xs text-gray-500 dark:text-gray-400">
-                Uploading a file overrides the path above. Max 2 MB.
+
+              <p v-if="imageFile" class="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                Ready to upload: {{ fileLabel(imageFile) }}
               </p>
+
+              <p
+                v-if="imageError"
+                class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 dark:border-red-800 dark:bg-red-900/40 dark:text-red-300"
+              >
+                {{ imageError }}
+              </p>
+
+              <div v-if="!imageFile" class="space-y-1">
+                <input
+                  v-model="form.image"
+                  type="text"
+                  placeholder="https://... (optional, used only when no file is chosen)"
+                  class="h-10 w-full rounded-xl border border-gray-200 bg-white px-4 text-sm text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
+                />
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  Prefer Choose file — it uploads straight to Cloudinary. A pasted URL is stored as-is.
+                </p>
+              </div>
             </div>
             <button
-              v-if="imageFile || form.image"
+              v-if="imageFile || form.image || imageError"
               type="button"
               class="rounded-full border border-gray-300 px-4 py-2 text-xs font-semibold text-gray-600 transition hover:border-red-300 hover:text-red-500 dark:border-gray-600 dark:text-gray-300"
               @click="clearImage"

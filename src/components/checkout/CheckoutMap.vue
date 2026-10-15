@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
-import { Loader2, LocateFixed, MapPin, RefreshCw, Search, X } from '@lucide/vue'
+import { Loader2, LocateFixed, MapPin, RefreshCw, X } from '@lucide/vue'
 import { useI18n } from '../../stores/i18n'
 import {
   DEFAULT_CENTER,
@@ -10,7 +10,6 @@ import {
   isGoogleMapsReady,
   loadGoogleMaps,
   resetGoogleMapsLoader,
-  reverseGeocode,
   type GoogleMapsErrorCode,
 } from '../../utils/googleMaps'
 import type { SelectedLocation } from '../../types'
@@ -19,20 +18,25 @@ import type { SelectedLocation } from '../../types'
  * ---------------------------------------------------------------------------
  * CheckoutMap
  * ---------------------------------------------------------------------------
- * Replaces the old free-text shipping address inputs. The customer places the
- * delivery pin by dragging the marker, clicking the map, or picking a place
- * from the Autocomplete search box, and this component reports the resulting
- * coordinate pair plus its formatted label upwards.
+ * Delivery location is chosen with the Google Maps JavaScript API and stored as
+ * a bare coordinate pair. Nothing here asks Google for an address: there is no
+ * Geocoding call, no Places request and no autocomplete, so the project only
+ * has to be able to render maps.
  *
- * Every selection path funnels through `select()`, so the parent only ever
- * receives one shape. The label comes from reverse geocoding on each move, and
- * the last result wins: geocoding is asynchronous, so a slow earlier request
- * must not overwrite a newer pin.
+ * The customer picks the pin three ways, and all three funnel through
+ * `select()`: clicking the map, dragging the marker, and the browser's own
+ * geolocation. `select()` is synchronous, so the hidden inputs and the emitted
+ * location can never drift apart from the pin on screen.
+ *
+ * The hidden inputs carry the real form values (`name`/`id` match what the
+ * backend validates) so the coordinates travel with a plain form post, while
+ * the `update:location` event is what the Vue parent actually reads.
  *
  * Accessibility: the map canvas is aria-hidden (Google's own controls are not
- * reliably screen-reader navigable), while the search box, the geolocation
- * button and the readout are all real focusable controls. The coordinate
- * readout is always visible, so the location is never conveyed by colour alone.
+ * reliably screen-reader navigable), while the geolocation button, the hidden
+ * coordinate readout and the retry button are all real focusable controls. The
+ * latitude/longitude readout is always visible once a pin exists, so the
+ * location is never conveyed by a marker alone.
  *
  * The classic google.maps.Marker is used rather than AdvancedMarkerElement
  * because the latter requires "Maps JavaScript API (New)" plus a map ID, and
@@ -49,16 +53,13 @@ const DEFAULT_LAT = DEFAULT_CENTER.lat
 const DEFAULT_LNG = DEFAULT_CENTER.lng
 
 const mapEl = ref<HTMLDivElement | null>(null)
-const searchEl = ref<HTMLInputElement | null>(null)
 
 const loading = ref(true)
 const loadError = ref('')
 const locating = ref(false)
-const geocodeError = ref('')
 /** True once a pin exists; gates the parent submit button. */
 const hasSelection = ref(false)
 
-const address = ref('')
 const latitude = ref<number | null>(null)
 const longitude = ref<number | null>(null)
 
@@ -68,12 +69,7 @@ const longitude = ref<number | null>(null)
  */
 const map = shallowRef<google.maps.Map | null>(null)
 const marker = shallowRef<google.maps.Marker | null>(null)
-let autocomplete: google.maps.places.Autocomplete | null = null
 let mapClickListener: google.maps.MapsEventListener | null = null
-/** Guards against a slow reverse geocode overwriting a newer pin. */
-let geocodeToken = 0
-/** Set once the component gives up on a boot attempt, so Retry can re-run it. */
-let unmounted = false
 
 /**
  * The four documented `*MapError` names plus this component's own failure
@@ -107,69 +103,24 @@ function describeLoadFailure(error: unknown): string {
   return t(LOAD_ERROR_MESSAGES[code])
 }
 
-function publish() {
-  const value =
-    latitude.value === null || longitude.value === null || !address.value
-      ? null
-      : { latitude: latitude.value, longitude: longitude.value, address: address.value }
-
-  hasSelection.value = value !== null
-  emit('update:location', value)
-}
-
 /**
- * Every selection path funnels through here, so the parent only ever receives
- * one shape.
- *
- * A place chosen from the search box already carries a label, so it commits
- * immediately. A drag, a map click or a geolocation fix has to be reverse
- * geocoded first, and there the marker moves straight away for responsiveness
- * while the coordinates and label are committed together once the Geocoding
- * response lands. Committing the coordinates early would let the card render
- * new coordinates next to the previous label for the length of the request.
- *
- * geocodeToken discards out-of-order responses: geocoding is asynchronous, so
- * a slow earlier request must never overwrite a newer pin.
+ * The single place a location becomes real. Writes the hidden inputs, the
+ * readout and the emitted value from the same two numbers, so there is exactly
+ * one source of truth and no async step that could be left pending.
  */
-async function select(lat: number, lng: number, label?: string) {
+function select(lat: number, lng: number) {
+  // Defensive: a malformed fix from the browser's geolocation must not be
+  // stored, because the backend rejects it and the customer cannot order.
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return
+
   marker.value?.setPosition({ lat, lng })
 
-  if (label) {
-    latitude.value = lat
-    longitude.value = lng
-    address.value = label
-    geocodeError.value = ''
-    publish()
-    return
-  }
+  latitude.value = Number(lat.toFixed(7))
+  longitude.value = Number(lng.toFixed(7))
 
-  const token = ++geocodeToken
-  geocodeError.value = ''
-
-  try {
-    const formatted = await reverseGeocode(lat, lng)
-
-    if (token !== geocodeToken) return
-
-    if (!formatted) {
-      geocodeError.value = t('mapAddressNotFound')
-      return
-    }
-
-    latitude.value = lat
-    longitude.value = lng
-    address.value = formatted
-    publish()
-  } catch (error) {
-    if (token !== geocodeToken) return
-    // A denied geocode is almost never the pin's fault: it means the Geocoding
-    // API is not enabled on the project, and no amount of re-picking will fix
-    // that, so it must not be reported as "try another spot".
-    geocodeError.value =
-      error instanceof GoogleMapsError && error.code === 'api-not-activated'
-        ? t('mapGeocodeNotConfigured')
-        : t('mapGeocodeFailed')
-  }
+  hasSelection.value = true
+  emit('update:location', { latitude: latitude.value, longitude: longitude.value })
 }
 
 /**
@@ -182,17 +133,20 @@ function placeMarkerAtCenter() {
   if (!map.value) return
   const center = map.value.getCenter()
   if (!center) return
-  void select(center.lat(), center.lng())
+  select(center.lat(), center.lng())
 }
 
+/**
+ * Browser geolocation. This is the platform API, not Google's, so it costs
+ * nothing and needs no Places/Geocoding permission on the Google project.
+ */
 function useMyLocation() {
   if (!('geolocation' in navigator)) {
-    geocodeError.value = t('mapLocationUnsupported')
+    loadError.value = t('mapLocationUnsupported')
     return
   }
 
   locating.value = true
-  geocodeError.value = ''
 
   navigator.geolocation.getCurrentPosition(
     (position) => {
@@ -200,12 +154,12 @@ function useMyLocation() {
 
       const { latitude: lat, longitude: lng } = position.coords
       map.value?.panTo({ lat, lng })
-      map.value?.setZoom(15)
-      void select(lat, lng)
+      map.value?.setZoom(16)
+      select(lat, lng)
     },
     (error) => {
       locating.value = false
-      geocodeError.value =
+      loadError.value =
         error.code === error.PERMISSION_DENIED
           ? t('mapLocationDenied')
           : t('mapLocationUnavailable')
@@ -215,29 +169,26 @@ function useMyLocation() {
 }
 
 function clearSelection() {
-  geocodeToken++
   latitude.value = null
   longitude.value = null
-  address.value = ''
-  geocodeError.value = ''
 
   if (marker.value) {
     marker.value.setMap(null)
     marker.value = null
   }
 
-  publish()
+  hasSelection.value = false
+  emit('update:location', null)
 }
 
 /**
- * Build the map, the marker, the listeners and the Autocomplete.
+ * Build the map and the marker.
  *
  * The whole body sits inside one try/catch on purpose. Previously only the
- * `await loadGoogleMaps()` was guarded, so anything that threw afterwards --
- * `new google.maps.Map()` when the library was not ready yet was the real one
- * -- escaped as an unhandled rejection from the onMounted callback and left
- * `loading` stuck on true. That is the "stuck on Loading Google Maps..."
- * report: nothing was retrying and nothing was failing visibly.
+ * `await loadGoogleMaps()` was guarded, so anything that threw afterwards
+ * escaped as an unhandled rejection from the onMounted callback and left
+ * `loading` stuck on true. That is the "stuck on Loading Google Maps..." report:
+ * nothing was retrying and nothing was failing visibly.
  */
 function buildMap(): void {
   if (!isGoogleMapsReady()) {
@@ -268,41 +219,13 @@ function buildMap(): void {
 
   marker.value.addListener('dragend', (event: google.maps.MapMouseEvent) => {
     if (!event.latLng) return
-    void select(event.latLng.lat(), event.latLng.lng())
+    select(event.latLng.lat(), event.latLng.lng())
   })
 
   mapClickListener = map.value.addListener('click', (event: google.maps.MapMouseEvent) => {
     if (!event.latLng) return
-    void select(event.latLng.lat(), event.latLng.lng())
+    select(event.latLng.lat(), event.latLng.lng())
   })
-
-  // The Autocomplete widget is attached to our own input so it inherits the
-  // form styling instead of injecting Google's default dropdown markup.
-  if (searchEl.value) {
-    autocomplete = new window.google.maps.places.Autocomplete(searchEl.value, {
-      fields: ['formatted_address', 'geometry', 'name'],
-    })
-
-    // Bias towards Cambodia so a bare street name resolves to a local result
-    // first. A bias, not a restriction: international addresses still resolve
-    // if the store ships abroad.
-    autocomplete.setBounds(new window.google.maps.LatLngBounds(
-      { lat: 10.4, lng: 103.0 },
-      { lat: 14.7, lng: 107.6 },
-    ))
-
-    autocomplete.addListener('place_changed', () => {
-      const place = autocomplete?.getPlace()
-      const location = place?.geometry?.location
-      if (!place || !location) return
-
-      map.value?.panTo(location)
-      map.value?.setZoom(16)
-      // formatted_address is preferred over `name`, which is often just a
-      // building or shop name.
-      void select(location.lat(), location.lng(), place.formatted_address ?? place.name ?? '')
-    })
-  }
 }
 
 /**
@@ -353,41 +276,33 @@ function retry() {
   void initMap()
 }
 
+/** Set once the component gives up on a boot attempt, so Retry can re-run it. */
+let unmounted = false
+
 onMounted(() => {
   void initMap()
 })
 
 onBeforeUnmount(() => {
   unmounted = true
-  geocodeToken++
   mapClickListener?.remove()
   mapClickListener = null
   marker.value = null
   map.value = null
-  autocomplete = null
 })
 </script>
 
 <template>
   <div class="space-y-4">
-    <!-- search + geolocation -->
-    <div class="flex flex-col gap-3 sm:flex-row">
-      <div class="relative flex-1">
-        <Search
-          class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
-          aria-hidden="true"
-        />
-        <label for="checkout-map-search" class="sr-only">{{ $t('mapSearchPlaceholder') }}</label>
-        <input
-          id="checkout-map-search"
-          ref="searchEl"
-          type="search"
-          :placeholder="$t('mapSearchPlaceholder')"
-          autocomplete="off"
-          class="w-full rounded-xl border border-gray-300 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-        />
-      </div>
+    <!--
+      The values the backend validates. `name`/`id` match the API contract, and
+      v-model is the only writer, so the inputs cannot drift from the pin.
+    -->
+    <input id="latitude" v-model="latitude" type="hidden" name="latitude" />
+    <input id="longitude" v-model="longitude" type="hidden" name="longitude" />
 
+    <!-- geolocation -->
+    <div class="flex flex-col gap-3 sm:flex-row">
       <button
         type="button"
         :disabled="locating || Boolean(loadError)"
@@ -406,12 +321,12 @@ onBeforeUnmount(() => {
     >
       <!--
         The map canvas is always in the DOM and never `display:none`, and the
-        spinner/error are absolutely positioned on top of it. The previous
-        `v-show="!loadError && !loading"` meant the element had zero size at the
-        exact moment `new google.maps.Map()` measured it, which produced a map
-        that initialised at 0x0 and could be left blank even after it appeared.
-        Google caches the size it computed at construction, so it has to be
-        given a real box up front. The wrapper above owns the height.
+        spinner/error are absolutely positioned on top of it. A `v-show` here
+        would mean the element had zero size at the exact moment
+        `new google.maps.Map()` measured it, producing a map that initialised at
+        0x0 and could stay blank even after it appeared. Google caches the size
+        it computed at construction, so it has to be given a real box up front.
+        The wrapper above owns the height.
       -->
       <div id="checkout-map" ref="mapEl" class="h-full w-full" aria-hidden="true"></div>
 
@@ -451,16 +366,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- errors: permission, unsupported, failed reverse geocode -->
-    <p
-      v-if="geocodeError"
-      role="alert"
-      class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
-    >
-      {{ geocodeError }}
-    </p>
-
-    <!-- selected location card -->
+    <!-- selected location readout -->
     <div
       v-if="hasSelection"
       class="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-900/20"
@@ -469,7 +375,7 @@ onBeforeUnmount(() => {
         <MapPin class="mt-0.5 h-5 w-5 shrink-0 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
         <div class="min-w-0">
           <p class="text-sm font-bold text-gray-900 dark:text-white">{{ $t('deliveryLocation') }}</p>
-          <p class="mt-0.5 text-sm break-words text-gray-700 dark:text-gray-200">{{ address }}</p>
+          <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-300">{{ $t('mapCoordinatesOnly') }}</p>
           <dl class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
             <div class="flex gap-1">
               <dt class="font-medium">{{ $t('latitude') }}:</dt>

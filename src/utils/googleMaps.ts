@@ -23,8 +23,14 @@
  * because Vite inlines `import.meta.env` at build time this file is the only
  * place the key has to be referenced.
  *
- * Concurrent callers share one promise, so the map, the geocoder and the
- * autocomplete all wait on the same load instead of racing to inject the tag.
+ * This module deliberately requests NO add-on libraries. There is no
+ * `libraries=places` on the tag and no Geocoding/Places call anywhere in the
+ * app: the checkout map is coordinates-only, so the store needs a project that
+ * can render Maps JavaScript and nothing else. Nothing here turns a coordinate
+ * into an address.
+ *
+ * Concurrent callers share one promise, so the map waits on one load instead of
+ * racing to inject a second tag.
  */
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY?.trim()
@@ -193,7 +199,6 @@ function injectScript(): Promise<void> {
     const params = new URLSearchParams({
       // Guarded by hasGoogleMapsKey() in loadGoogleMaps().
       key: API_KEY as string,
-      libraries: 'places',
       loading: 'async',
       // v=weekly is Google's current recommended version pin; the legacy
       // v=3 param is no longer needed.
@@ -226,18 +231,14 @@ function injectScript(): Promise<void> {
  * Pull the real library out of the bootstrap. Resolves only once `Map` is a
  * constructor; rejects with a classified `GoogleMapsError` otherwise.
  *
- * Both libraries the checkout page uses are awaited: `maps` for Map/Marker/
- * LatLngBounds and `places` for the Autocomplete widget. Awaiting them
- * together means `buildMap()` cannot hit a half-loaded namespace.
+ * Only the `maps` library is imported: it supplies Map, Marker and LatLng,
+ * which is everything the coordinates-only checkout needs.
  */
 async function bootMapsLibrary(diagnostics: string[]): Promise<void> {
   await waitFor(() => typeof window.google?.maps?.importLibrary === 'function', diagnostics)
 
   try {
-    await Promise.all([
-      window.google!.maps.importLibrary('maps'),
-      window.google!.maps.importLibrary('places'),
-    ])
+    await window.google!.maps.importLibrary('maps')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new GoogleMapsError(
@@ -290,47 +291,4 @@ export function loadGoogleMaps(): Promise<void> {
     .finally(untap)
 
   return loader
-}
-
-/**
- * Reverse-geocode a coordinate pair into a single-line formatted address.
- *
- * Uses the legacy `Geocoder.geocode()` rather than the newer `getAddress()`
- * because the installed @types/google.maps only declares `geocode()`, and it is
- * the method available across every Maps JS API version the key might be
- * pinned to. Throws on a transport/API error so callers can surface it.
- */
-export async function reverseGeocode(
-  lat: number,
-  lng: number,
-): Promise<string> {
-  await loadGoogleMaps()
-
-  const geocoder = new window.google.maps.Geocoder()
-  const response = await geocoder.geocode({ location: { lat, lng } }).catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error)
-
-    // REQUEST_DENIED here means the Geocoding API is not enabled on the
-    // project (or the key may not use it), not that this particular pin is
-    // bad. Telling the customer to "pick another spot" would send them around
-    // in circles, so it is reported as its own kind of failure.
-    const isConfigurationProblem =
-      /REQUEST_DENIED|not activated|not authorized/i.test(message)
-
-    throw new GoogleMapsError(
-      isConfigurationProblem ? 'api-not-activated' : 'boot-failed',
-      message,
-    )
-  })
-
-  const results = response.results
-
-  if (results.length === 0) return ''
-
-  // formatted_address is the readable single line the card shows. The address
-  // components are the fallback for the rare coordinate with no label.
-  const first = results[0]
-  if (first.formatted_address) return first.formatted_address
-
-  return first.address_components.map((part: google.maps.GeocoderAddressComponent) => part.long_name).join(', ')
 }

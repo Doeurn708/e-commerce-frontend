@@ -217,7 +217,10 @@ export function normalizeOrder(raw: unknown): Order {
     status: (str(o.status, 'pending') || 'pending') as Order['status'],
     payment_status: (str(o.payment_status, 'unpaid') || 'unpaid') as Order['payment_status'],
     payment_method: (str(o.payment_method, 'cod') || 'cod') as Order['payment_method'],
-    shipping_address: str(o.shipping_address),
+    // Null, not '': the checkout map is coordinates-only, so a new order has no
+    // street address at all. Preserved as null so the UI can say "no address"
+    // instead of printing an empty string next to the coordinates.
+    shipping_address: o.shipping_address == null ? null : str(o.shipping_address),
     // Null, not 0: a pre-map order has no coordinates and 0,0 is a real point
     // in the Gulf of Guinea that must never be mistaken for "no pin".
     latitude: o.latitude == null ? null : num(o.latitude),
@@ -250,6 +253,8 @@ export function normalizeAdminOrder(raw: unknown): AdminOrder {
     user_id: order.user_id,
     total_price: order.total_price,
     status: order.status,
+    // Carried through as-is (nullable): the admin detail view already renders
+    // a dash when there is no address, which is the coordinates-only case.
     shipping_address: order.shipping_address,
     phone: order.phone,
     created_at: order.created_at,

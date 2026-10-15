@@ -192,8 +192,45 @@ const summaryRow = 'flex justify-between text-sm'
               </div>
               <div class="flex justify-between gap-3">
                 <dt class="shrink-0 text-gray-500 dark:text-gray-400">{{ $t('address') }}</dt>
+                <!--
+                  The checkout map is coordinates-only, so shipping_address is
+                  normally absent. Join only the parts that exist instead of
+                  interpolating every field, which would render ", ," for an
+                  order with no address at all.
+                -->
                 <dd class="text-right font-medium text-gray-900 dark:text-white">
-                  {{ order.shipping_address }}, {{ order.city }}, {{ order.province }} {{ order.postal_code }}
+                  <span
+                    v-if="[
+                      order.shipping_address,
+                      order.city,
+                      order.province,
+                      order.postal_code,
+                    ].filter(Boolean).length"
+                    >{{
+                      [
+                        order.shipping_address,
+                        order.city,
+                        order.province,
+                        order.postal_code,
+                      ]
+                        .filter(Boolean)
+                        .join(', ')
+                    }}</span
+                  >
+                  <span v-else class="text-gray-400 dark:text-gray-500">-</span>
+                </dd>
+              </div>
+              <!--
+                The delivery location actually used. Shown because it is now the
+                only thing a courier can navigate to.
+              -->
+              <div
+                v-if="order.latitude != null && order.longitude != null"
+                class="flex justify-between gap-3"
+              >
+                <dt class="shrink-0 text-gray-500 dark:text-gray-400">{{ $t('deliveryLocation') }}</dt>
+                <dd class="text-right font-medium tabular-nums text-gray-900 dark:text-white">
+                  {{ order.latitude.toFixed(7) }}, {{ order.longitude.toFixed(7) }}
                 </dd>
               </div>
             </dl>

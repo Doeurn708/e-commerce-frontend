@@ -62,9 +62,9 @@ export async function getOrder(id: number | string): Promise<Order> {
  * ids are filtered out when missing rather than forwarded as `undefined`,
  * which Laravel would reject with a 422.
  *
- * `latitude`/`longitude` are required because OrderController::store() pairs
- * them with shipping_address: an address without a pin cannot be delivered to.
- * The checkout map is the only place they come from.
+ * `latitude`/`longitude` are the delivery location and are required.
+ * `shipping_address` is optional and normally omitted: the checkout map is
+ * coordinates-only and no street address is ever typed or reverse-geocoded.
  */
 export function buildOrderPayload(cart: CartLine[], form: ShippingForm): CreateOrderPayload {
   const items = cart
@@ -72,9 +72,8 @@ export function buildOrderPayload(cart: CartLine[], form: ShippingForm): CreateO
     .filter((item) => Number.isFinite(item.product_id) && item.product_id > 0)
     .map((item) => ({ product_id: item.product_id, quantity: Math.max(1, Math.trunc(item.quantity)) }))
 
-  return {
+  const payload: CreateOrderPayload = {
     payment_method: form.payment_method,
-    shipping_address: form.shipping_address.trim(),
     latitude: Number(form.latitude),
     longitude: Number(form.longitude),
     phone: form.phone.trim(),
@@ -83,6 +82,14 @@ export function buildOrderPayload(cart: CartLine[], form: ShippingForm): CreateO
     postal_code: form.postal_code.trim(),
     items,
   }
+
+  // Only send a street address when a caller genuinely has one. Sending an
+  // empty string would fail the backend's `nullable` string rule on some
+  // drivers and store a meaningless blank row.
+  const address = form.shipping_address?.trim()
+  if (address) payload.shipping_address = address
+
+  return payload
 }
 
 export interface CartLine {
@@ -92,7 +99,8 @@ export interface CartLine {
 
 export interface ShippingForm {
   payment_method: CreateOrderPayload['payment_method']
-  shipping_address: string
+  /** Optional: the map supplies coordinates, not an address. */
+  shipping_address?: string
   latitude: number
   longitude: number
   phone: string
@@ -117,7 +125,7 @@ export function validateCart(cart: CartLine[]): string | null {
 export function validateShipping(form: ShippingForm): Record<string, string> {
   const errors: Record<string, string> = {}
 
-  if (!form.shipping_address.trim()) errors.shipping_address = 'The shipping address field is required.'
+  // shipping_address is intentionally not checked: it is optional now.
 
   // Mirrors 'numeric|between:-90,90' and 'numeric|between:-180,180'. Number.isFinite
   // rejects NaN from an unset pin before the range check would let it through.
